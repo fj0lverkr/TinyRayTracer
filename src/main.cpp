@@ -4,6 +4,13 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <algorithm>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
 #include "math/Vec.hpp"
 #include "graphics/Light.hpp"
 #include "graphics/Material.hpp"
@@ -18,8 +25,10 @@ const Vec3f WHITECOLOR = Vec3f(1.0f, 1.0f, 1.0f);
 const Vec3f REFRACTCOLOR = Vec3f(0.6f, 0.7f, 0.8f);
 const Vec3f SPECULARALEDOCOLOR = WHITECOLOR;
 
-const int WIDTH = 1024;
-const int HEIGHT = 768;
+constexpr int WIDTH = 1024;
+constexpr int HEIGHT = 768;
+
+const string ENVMAP = "res/envmap.jpg";
 
 const vector<Vec3f> COLORS{BGCOLOR, GREYCOLOR, REDCOLOR, WHITECOLOR};
 
@@ -36,9 +45,33 @@ const Material GLASS(Vec4f(0.f, 0.5f, 0.1f, 0.8f), REFRACTCOLOR, 125.f, 1.5f);
 const Material REDRUBBER(Vec4f(0.9f, 0.1f, 0.f, 0.f), COLORS[Colors::RED], 10.f, 1.f);
 const Material MIRROR(Vec4f(0.f, 10.f, 0.8f, 0.f), COLORS[Colors::WHITE], 1425.f, 1.f);
 
+int envmap_width, envmap_height;
+vector<Vec3f> envmap;
+
+bool loadEnvMap(const string &path)
+{
+	int n = -1;
+	unsigned char *pixmap = stbi_load(path.c_str(), &envmap_width, &envmap_height, &n, 0);
+	if (!pixmap || 3 != n)
+	{
+		cout << pixmap << endl;
+		cerr << "Error: can not load the environment map in path " + path + "!" << endl;
+		return false;
+	}
+	envmap = vector<Vec3f>(envmap_width * envmap_height);
+	for (int j = envmap_height - 1; j >= 0; j--)
+	{
+		for (int i = 0; i < envmap_width; i++)
+		{
+			envmap[i + j * envmap_width] = Vec3f(pixmap[(i + j * envmap_width) * 3 + 0], pixmap[(i + j * envmap_width) * 3 + 1], pixmap[(i + j * envmap_width) * 3 + 2]) * (1 / 255.);
+		}
+	}
+	stbi_image_free(pixmap);
+	return true;
+}
+
 Vec3f reflect(const Vec3f &I, const Vec3f &N)
 {
-
 	return I - N * 2.f * (I * N);
 }
 
@@ -62,7 +95,10 @@ Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index)
 
 bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
 {
-	float spheres_dist = std::numeric_limits<float>::max();
+	float spheres_dist = numeric_limits<float>::max();
+	float checkerboard_dist = numeric_limits<float>::max();
+	float envmap_dist = numeric_limits<float>::max();
+
 	for (size_t i = 0; i < spheres.size(); i++)
 	{
 		float dist_i;
@@ -74,7 +110,6 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
 			material = spheres[i].getMaterial();
 		}
 	}
-	float checkerboard_dist = std::numeric_limits<float>::max();
 
 	if (fabs(dir.y) > 1e-3)
 	{
@@ -89,7 +124,17 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
 			material.setDiffuseColor(material.getDiffuseColor() * .3);
 		}
 	}
-	return std::min(spheres_dist, checkerboard_dist) < 1000;
+
+	return min(spheres_dist, checkerboard_dist) < 1000;
+}
+
+Vec3f renderEnvMap(const Vec3f &dir)
+{
+	Vec3f d = dir.normalized();
+	int x = max(0, min(envmap_width - 1, static_cast<int>((atan2(d.z, d.x) / (2 * M_PI) + .5) * envmap_width)));
+	int y = max(0, min(envmap_height - 1, static_cast<int>(acos(d.y) / M_PI * envmap_height)));
+
+	return envmap[(x + y * envmap_width)];
 }
 
 Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const vector<Sphere> &spheres, const vector<Light> &lights, size_t depth = 0)
@@ -99,7 +144,7 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const vector<Sphere> &sphere
 
 	if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material))
 	{
-		return COLORS[Colors::BG]; // background color
+		return renderEnvMap(dir);
 	}
 
 	Vec3f reflect_dir = reflect(dir, N).normalized();
@@ -141,6 +186,7 @@ void render(const vector<Sphere> &spheres, const vector<Light> &lights)
 			float x = (2 * (k + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height;
 			float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);
 			Vec3f dir = Vec3f(x, y, -1).normalized();
+			Vec3f envmap_pixel = envmap[k + j * envmap_width];
 			framebuffer[k + j * width] = cast_ray(Vec3f(0.f, 0.f, 0.f), dir, spheres, lights);
 		}
 	}
@@ -165,8 +211,13 @@ void render(const vector<Sphere> &spheres, const vector<Light> &lights)
 
 int main()
 {
-	cout << "Setting up spheres..." << endl;
+	cout << "Loading environment map..." << endl;
+	if (!loadEnvMap(ENVMAP))
+	{
+		return -1;
+	}
 
+	cout << "Setting up spheres..." << endl;
 	vector<Sphere> spheres;
 	vector<Light> lights;
 	spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, IVORY));
@@ -174,6 +225,7 @@ int main()
 	spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, REDRUBBER));
 	spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, MIRROR));
 
+	cout << "Setting up lights..." << endl;
 	lights.push_back(Light(Vec3f(-20, 20, 20), 1.5));
 	lights.push_back(Light(Vec3f(30, 50, -25), 1.8));
 	lights.push_back(Light(Vec3f(30, 20, 30), 1.7));
